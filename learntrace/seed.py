@@ -8,8 +8,8 @@
   idx 0–24  同意研究、完成單元、送出小考 → 本輪可分析學生 25 人
   idx 25    同意、完成單元、開始小考但沒送出（確認時變 expired）
   idx 26    同意、完成單元、沒開始小考
-  idx 27    同意、沒完成單元（漏做第 3 個概念的練習）
-  idx 28–29 不同意研究（研究表不應出現任何資料）
+  idx 27    同意、沒完成單元（漏做第 3 個概念的練習）→ 伺服器不讓他進驗證小考
+  idx 28–29 不同意研究：功能照常可用（也會按聽不懂、提問），但研究表不應出現任何資料
 """
 import json
 import random
@@ -82,9 +82,9 @@ PLANS = {
         'predict': [('c2', '學生容易把充電與放電曲線搞混'), ('c3', '單位換算常出錯')],
         'practice_wrong': {'c1': R(0, 11) + R(25, 29), 'c2': R(0, 4), 'c3': R(0, 2)},
         'level_down': {'c1': R(5, 12) + [25, 28], 'c2': [20, 21]},
-        'not_understood': {'c1': R(8, 14) + [26]},
-        'questions': {'c1': R(0, 3) + [27]},
-        'quiz_wrong': {'q-c1-1': R(0, 13), 'q-c1-2': R(0, 9), 'q-c2-1': R(0, 2), 'q-c2-2': R(10, 12),
+        'not_understood': {'c1': R(8, 14) + [26, 28]},
+        'questions': {'c1': R(0, 3) + [27, 29]},
+        'quiz_item_wrong': {'q-c1-1': R(0, 13), 'q-c1-2': R(0, 9), 'q-c2-1': R(0, 2), 'q-c2-2': R(10, 12),
                        'q-c3-1': [20, 21]},
         'quiz_blank': {'q-c3-2': [24]},
     },
@@ -94,7 +94,7 @@ PLANS = {
         'level_down': {'c1': [4, 5]},
         'not_understood': {},
         'questions': {'c1': [0]},
-        'quiz_wrong': {'q-c1-1': R(0, 2), 'q-c2-2': [5]},
+        'quiz_item_wrong': {'q-c1-1': R(0, 2), 'q-c2-2': [5]},
         'quiz_blank': {},
     },
 }
@@ -119,7 +119,6 @@ def simulate(conn, scenario):
     for i in range(N_STUDENTS):
         sid = student_id(i)
         S.set_consent(conn, sid, ROUND_ID, 'declined' if i >= 28 else 'consented')
-        consented = i < 28
         for cid in ('c1', 'c2', 'c3'):
             S.view_content(conn, sid, ROUND_ID, cid, 1)
             p = C.PRACTICE[cid]
@@ -128,16 +127,16 @@ def simulate(conn, scenario):
             if i in plan['practice_wrong'].get(cid, []):
                 S.answer_practice(conn, sid, ROUND_ID, p['item_id'], _wrong_choice(p['options'], p['answer']))
             S.answer_practice(conn, sid, ROUND_ID, p['item_id'], p['answer'])
-            if scenario == 'A' and i == 15 and cid == 'c1':   # 先答對再答錯 → 不算 quiz_wrong
+            if scenario == 'A' and i == 15 and cid == 'c1':   # 先答對再答錯 → 不算 practice_first_wrong
                 S.answer_practice(conn, sid, ROUND_ID, p['item_id'], _wrong_choice(p['options'], p['answer']))
             if i in plan['level_down'].get(cid, []):
                 S.level_down(conn, sid, ROUND_ID, cid)
                 if i == 5:                    # 連按兩次 → 只記 1 次訊號
                     S.level_down(conn, sid, ROUND_ID, cid)
-            if consented and i in plan['not_understood'].get(cid, []):
+            if i in plan['not_understood'].get(cid, []):
                 for _ in range(3 if i == 8 else 1):   # 狂按 → 只記 1 次
                     S.not_understood(conn, sid, ROUND_ID, cid)
-            if consented and i in plan['questions'].get(cid, []):
+            if i in plan['questions'].get(cid, []):
                 S.submit_question(conn, sid, ROUND_ID, cid, QUESTION_TEXTS[i % len(QUESTION_TEXTS)])
         S.request_unit_complete(conn, sid, ROUND_ID)
 
@@ -145,7 +144,7 @@ def simulate(conn, scenario):
     items = [(f'q-{cid}-{k + 1}', q) for cid, qs in C.QUIZ.items() for k, q in enumerate(qs)]
     for i in range(N_STUDENTS):
         sid = student_id(i)
-        if i == 26:
+        if i in (26, 27):        # 26 沒開始作答；27 沒完成單元，伺服器不讓他進小考
             continue
         S.quiz_start(conn, sid, ROUND_ID)
         if i == 25:
@@ -154,7 +153,7 @@ def simulate(conn, scenario):
         for qid, q in items:
             if i in plan['quiz_blank'].get(qid, []):
                 answers[qid] = None
-            elif i in plan['quiz_wrong'].get(qid, []):
+            elif i in plan['quiz_item_wrong'].get(qid, []):
                 answers[qid] = _wrong_choice(q['options'], q['answer'])
             else:
                 answers[qid] = q['answer']

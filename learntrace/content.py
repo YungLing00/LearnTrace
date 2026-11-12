@@ -55,7 +55,7 @@ LEVELS = {
     ],
 }
 
-# 每個概念一題課中練習（第一次作答錯誤 → quiz_wrong）
+# 每個概念一題課中練習（第一次作答錯誤 → practice_first_wrong）
 PRACTICE = {
     'c1': {'item_id': 'p-c1', 'stem': '若電阻或電容變大，時間常數 τ 會如何變化？',
            'options': ['變小', '不變', '變大'], 'answer': '變大',

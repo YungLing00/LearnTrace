@@ -34,9 +34,9 @@ A、B 都已模擬學生學習與小考，停在「驗證小考進行中」。�
 
 | 模組 | 主要規則 | 程式 |
 |---|---|---|
-| 同意與研究代號 | 研究表只寫入 `consented`；不同意者只留營運層進度，提問與小考作答不寫入資料庫 | `services.set_consent`、`research_code` |
-| 學生單元頁 | 四種訊號同一學生、同一概念、同一輪最多記 1 次；`quiz_wrong` 由伺服器判定第一次作答；`unit_completed` 由伺服器檢查條件後建立 | `answer_practice`、`level_down`、`not_understood`、`submit_question`、`request_unit_complete` |
-| 驗證小考 | 教師命題並鎖定；學生端看不到答案與概念；`quiz_attempts` started → submitted／expired；任一題未作答則該概念 `quiz_score` 為 null | `lock_quiz_items`、`quiz_start`、`quiz_submit`、`export_rows` |
+| 同意與研究代號 | 研究表只寫入 `consented`；不同意者的學習功能完全相同（含「我還是不懂」與「留下問題」），但只留營運層進度，提問文字與小考作答不寫入任何資料庫 | `services.set_consent`、`research_code` |
+| 學生單元頁 | 四種訊號同一學生、同一概念、同一輪最多記 1 次；`practice_first_wrong` 由伺服器判定第一次作答；`unit_completed` 由伺服器檢查條件後建立 | `answer_practice`、`level_down`、`not_understood`、`submit_question`、`request_unit_complete` |
+| 驗證小考 | 伺服器確認已完成單元才能開始與送出（否則 409）；教師命題並鎖定；學生端看不到答案與概念；`quiz_attempts` started → submitted／expired；任一題未作答則該概念 `quiz_score` 為 null | `lock_quiz_items`、`quiz_start`、`quiz_submit`、`export_rows` |
 | 教師流程 | 事前預測（2–3 個、送出即鎖）→ 開放小考 → 小考資料確認（只給人數）→ 洞察卡快照 → 回應（必填原因、送出即鎖、可補記） | `submit_predictions`、`confirm_quiz`、`generate_cards`、`respond_card` |
 
 ## 資料與鎖定
@@ -46,6 +46,7 @@ A、B 都已模擬學生學習與小考，停在「驗證小考進行中」。�
 - 時間一律由資料庫產生，不接受前端時間。
 - 洞察卡門檻：任一訊號的學生至少 5 人，且達本輪可分析學生的 30%（無條件進位）。單一訊號少於 5 人只顯示「少於 5 人」；提問者少於 5 人不產生常見困惑摘要。
 - 本輪可分析學生＝同意研究、完成指定單元、送出驗證小考。
+- 訊號名稱 `practice_first_wrong`（介面顯示「課中練習首次答錯」）指單元內課中練習的第一次作答錯誤，和獨立驗證小考的答錯是兩回事，不能混用。
 
 ## 正式收案前必須補上
 

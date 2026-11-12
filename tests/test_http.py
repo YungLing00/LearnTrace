@@ -67,13 +67,22 @@ class AcceptanceTest(unittest.TestCase):
                 self.ok('POST', '/api/student/practice', {'item_id': p['item_id'], 'choice': p['answer']}, sid)
             if i < 2:
                 self.ok('POST', '/api/student/level_down', {'concept_id': 'c1'}, sid)
+            if sid == 'ST11':   # 不同意研究者：按鈕照常可用，但不記錄、不保存
+                nu = self.ok('POST', '/api/student/not_understood', {'concept_id': 'c1'}, sid)
+                q = self.ok('POST', '/api/student/question', {'concept_id': 'c1', 'text': '還是不懂'}, sid)
+                self.assertEqual((nu['recorded'], q['recorded']), (False, False))
             r = self.ok('POST', '/api/student/complete', None, sid)
             self.assertTrue(r['completed'])
         # 學生端不能做教師的事
         status, _ = self.c.call('POST', '/api/teacher/open_quiz', None, 'ST01')
         self.assertEqual(status, 403)
 
+        # ST12 同意研究但沒完成單元
+        self.ok('POST', '/api/student/consent', {'decision': 'consented'}, 'ST12')
+        self.ok('POST', '/api/student/view', {'concept_id': 'c1', 'level': 1}, 'ST12')
         self.ok('POST', '/api/teacher/open_quiz', None, T)
+        status, _ = self.c.call('POST', '/api/student/quiz/start', None, 'ST12')
+        self.assertEqual(status, 409)
         for sid in students:
             q = self.ok('POST', '/api/student/quiz/start', None, sid)
             self.assertNotIn('answer', json.dumps(q['items'], ensure_ascii=False).replace('"options"', ''))
@@ -81,7 +90,7 @@ class AcceptanceTest(unittest.TestCase):
             self.ok('POST', '/api/student/quiz/submit', {'answers': answers}, sid)
 
         status = self.ok('GET', '/api/teacher/quiz_status', None, T)
-        self.assertEqual((status['consented_n'], status['completed_n']), (10, 10))
+        self.assertEqual((status['consented_n'], status['completed_n']), (11, 10))
         bad, _ = self.c.call('POST', '/api/teacher/quiz_confirm', {'map_ok': True, 'closed_ok': False}, T)
         self.assertEqual(bad, 400)
         self.assertEqual(self.ok('POST', '/api/teacher/quiz_confirm', {'map_ok': True, 'closed_ok': True}, T)['cards'], 1)
@@ -89,9 +98,9 @@ class AcceptanceTest(unittest.TestCase):
         cards = self.ok('GET', '/api/teacher/cards', None, T)['cards']
         self.assertEqual(len(cards), 1)
         sig = {s['signal']: s for s in cards[0]['display']['signals']}
-        self.assertEqual(sig['quiz_wrong']['text'], '6 / 10 人（60.0%）')
+        self.assertEqual(sig['practice_first_wrong']['text'], '6 / 10 人（60.0%）')
         self.assertTrue(sig['level_down']['masked'])
-        self.assertEqual(cards[0]['display']['denominator_text'], '本輪可分析學生 10 / 10 人')
+        self.assertEqual(cards[0]['display']['denominator_text'], '本輪可分析學生 10 / 11 人')
 
         card_id = cards[0]['card_id']
         self.ok('POST', f'/api/teacher/cards/{card_id}/response', {'response': 'adopt', 'note': '下週補充生活案例'}, T)
@@ -103,7 +112,7 @@ class AcceptanceTest(unittest.TestCase):
         # 研究者：追溯與匯出
         trace = self.ok('GET', f'/api/research/trace/{card_id}', None, RS)
         self.assertTrue(trace['all_match'])
-        wrong = next(s for s in trace['signals'] if s['signal'] == 'quiz_wrong')
+        wrong = next(s for s in trace['signals'] if s['signal'] == 'practice_first_wrong')
         self.assertEqual(len(wrong['evidence']), 6)
         status, csv_text = self.c.call('GET', '/api/research/export.csv', None, RS)
         self.assertEqual(status, 200)

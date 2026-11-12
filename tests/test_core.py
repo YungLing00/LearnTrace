@@ -36,40 +36,48 @@ def open_learning(conn):
     S.submit_predictions(conn, T, R, [{'concept_id': 'c1'}, {'concept_id': 'c2'}])
 
 
+def complete_unit(conn, sid):
+    for cid, p in PRACTICE.items():
+        S.view_content(conn, sid, R, cid, 1)
+        S.answer_practice(conn, sid, R, p['item_id'], p['answer'])
+    assert S.request_unit_complete(conn, sid, R)['completed']
+
+
 class ConsentTest(unittest.TestCase):
-    def test_declined_student_leaves_nothing_in_research_tables(self):
+    def test_declined_student_sees_same_controls_and_no_research_write(self):
+        """不同意研究者可以用所有學習功能，但研究表沒有任何資料，問題文字也不保存。"""
         c = fresh()
         open_learning(c)
+        S.lock_quiz_items(c, T, R)
         sid = 'ST01'
         S.set_consent(c, sid, R, 'declined')
         code = code_of(c, sid)
         p = PRACTICE['c1']
         S.view_content(c, sid, R, 'c1', 1)
         S.answer_practice(c, sid, R, p['item_id'], '變小')
-        S.level_down(c, sid, R, 'c1')
-        with self.assertRaises(S.LTError):
-            S.not_understood(c, sid, R, 'c1')
-        with self.assertRaises(S.LTError):
-            S.submit_question(c, sid, R, 'c1', '問題')
+        self.assertEqual(S.level_down(c, sid, R, 'c1')['level'], 2)
+        nu = S.not_understood(c, sid, R, 'c1')
+        self.assertEqual(nu['recorded'], False)
+        self.assertIn('不會被記錄', nu['message'])
+        q = S.submit_question(c, sid, R, 'c1', '我還是不懂 τ 變大代表什麼')
+        self.assertEqual(q, {'recorded': False, 'message': S.NOT_STORED_NOTICE})
+        complete_unit(c, sid)
+        S.open_quiz(c, T, R)
+        S.quiz_start(c, sid, R)
+        S.quiz_submit(c, sid, R, {'q-c1-1': 'A'})
         for t in ('event_log', 'signal_events', 'questions', 'quiz_attempts', 'quiz_responses'):
             self.assertEqual(count(c, f'SELECT COUNT(*) FROM {t} WHERE research_code=?', (code,)), 0, t)
+            self.assertEqual(count(c, f'SELECT COUNT(*) FROM {t}'), 0, t)
+        # 問題文字沒有寫進任何資料庫檔
+        for db in ('main', 'ident', 'ops'):
+            for (tbl,) in c.execute(f"SELECT name FROM {db}.sqlite_master WHERE type='table'").fetchall():
+                for row in c.execute(f'SELECT * FROM {db}.{tbl}').fetchall():
+                    self.assertNotIn('我還是不懂', ' '.join(str(v) for v in tuple(row)), f'{db}.{tbl}')
         # 營運層照常記錄進度
         prog = c.execute("SELECT * FROM ops.app_progress WHERE account_id=? AND concept_id='c1'", (sid,)).fetchone()
         self.assertIsNotNone(prog['level1_viewed_at'])
-        self.assertEqual(prog['current_level'], 2)
-
-    def test_declined_quiz_answers_are_discarded(self):
-        c = fresh()
-        open_learning(c)
-        S.lock_quiz_items(c, T, R)
-        S.open_quiz(c, T, R)
-        S.set_consent(c, 'ST02', R, 'declined')
-        S.quiz_start(c, 'ST02', R)
-        S.quiz_submit(c, 'ST02', R, {'q-c1-1': 'A'})
-        self.assertEqual(count(c, 'SELECT COUNT(*) FROM quiz_responses'), 0)
-        self.assertEqual(count(c, 'SELECT COUNT(*) FROM quiz_attempts'), 0)
-        u = c.execute("SELECT quiz_completed_at FROM ops.app_unit WHERE account_id='ST02'").fetchone()
-        self.assertIsNotNone(u[0])
+        u = c.execute('SELECT unit_completed_at, quiz_completed_at FROM ops.app_unit WHERE account_id=?', (sid,)).fetchone()
+        self.assertTrue(u[0] and u[1])
 
     def test_consent_choice_is_once(self):
         c = fresh()
@@ -108,15 +116,15 @@ class SignalTest(unittest.TestCase):
             S.level_down(self.c, 'ST01', R, 'c1')       # 已是第 3 層
         self.assertEqual(self.signals('level_down'), 1)
 
-    def test_quiz_wrong_only_on_first_attempt(self):
+    def test_practice_first_wrong_only_on_first_attempt(self):
         p = PRACTICE['c1']
         S.answer_practice(self.c, 'ST01', R, p['item_id'], '變大')   # 第一次答對
         S.answer_practice(self.c, 'ST01', R, p['item_id'], '變小')   # 之後答錯
-        self.assertEqual(self.signals('quiz_wrong'), 0)
+        self.assertEqual(self.signals('practice_first_wrong'), 0)
         S.set_consent(self.c, 'ST02', R, 'consented')
         S.answer_practice(self.c, 'ST02', R, p['item_id'], '變小')   # 第一次答錯
         S.answer_practice(self.c, 'ST02', R, p['item_id'], '變大')
-        self.assertEqual(count(self.c, "SELECT COUNT(*) FROM signal_events WHERE signal_type='quiz_wrong'"), 1)
+        self.assertEqual(count(self.c, "SELECT COUNT(*) FROM signal_events WHERE signal_type='practice_first_wrong'"), 1)
 
     def test_correctness_is_judged_by_server(self):
         with self.assertRaises(S.LTError):
@@ -213,17 +221,32 @@ class QuizTest(unittest.TestCase):
         c = fresh('A')
         status = S.quiz_status(c, T, R)
         self.assertEqual((status['consented_n'], status['completed_n'], status['not_completed_n'],
-                          status['missing_cells']), (28, 26, 2, 1))
+                          status['missing_cells']), (28, 25, 3, 1))
         S.confirm_quiz(c, T, R, True, True)
         rows = dict(c.execute('SELECT status, COUNT(*) FROM quiz_attempts GROUP BY status').fetchall())
-        self.assertEqual(rows, {'submitted': 26, 'expired': 1})
+        self.assertEqual(rows, {'submitted': 25, 'expired': 1})
+
+    def test_quiz_requires_unit_completed(self):
+        c = fresh()
+        open_learning(c)
+        S.lock_quiz_items(c, T, R)
+        S.set_consent(c, 'ST01', R, 'consented')
+        S.view_content(c, 'ST01', R, 'c1', 1)              # 只做了一部分
+        S.open_quiz(c, T, R)
+        for call in (lambda: S.quiz_start(c, 'ST01', R), lambda: S.quiz_submit(c, 'ST01', R, {})):
+            with self.assertRaises(S.LTError) as e:
+                call()
+            self.assertEqual(e.exception.status, 409)
+        self.assertEqual(S.quiz_view(c, 'ST01', R)['items'], [])
+        self.assertEqual(count(c, 'SELECT COUNT(*) FROM quiz_attempts'), 0)
 
     def test_submit_once(self):
         c = fresh()
         open_learning(c)
         S.lock_quiz_items(c, T, R)
-        S.open_quiz(c, T, R)
         S.set_consent(c, 'ST01', R, 'consented')
+        complete_unit(c, 'ST01')
+        S.open_quiz(c, T, R)
         with self.assertRaises(S.LTError):
             S.quiz_submit(c, 'ST01', R, {})          # 要先開始
         S.quiz_start(c, 'ST01', R)
@@ -267,7 +290,7 @@ class CardTest(unittest.TestCase):
         self.assertEqual(card['concept_id'], 'c1')
         self.assertEqual((card['analyzable_n'], card['consented_n']), (25, 28))
         self.assertEqual(json.loads(card['counts']),
-                         {'quiz_wrong': 12, 'level_down': 8, 'not_understood': 7, 'question_submitted': 4})
+                         {'practice_first_wrong': 12, 'level_down': 8, 'not_understood': 7, 'question_submitted': 4})
         disp = json.loads(card['display'])
         q = next(s for s in disp['signals'] if s['signal'] == 'question_submitted')
         self.assertEqual((q['masked'], q['text']), (True, '少於 5 人'))

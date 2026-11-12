@@ -4,7 +4,7 @@
 const $app = document.getElementById('app');
 const TEACHER = 'T01';
 const RESEARCHER = 'RS01';
-const SIGNAL_LABELS = { quiz_wrong: '答錯', level_down: '要求簡化說明', not_understood: '按「聽不懂」', question_submitted: '留下相關問題' };
+const SIGNAL_LABELS = { practice_first_wrong: '課中練習首次答錯', level_down: '要求簡化說明', not_understood: '按「聽不懂」', question_submitted: '留下相關問題' };
 const RESPONSES = [['adopt', '採納'], ['later', '延後'], ['known', '早就知道'], ['disagree', '不同意']];
 const RESPONSE_EXAMPLE = {
   adopt: '例如：下週上課先用充電例子講 5 分鐘',
@@ -122,7 +122,7 @@ async function renderStudent(id) {
 
   if (st.consent === 'pending') return show(back, consentView(id));
   const banner = st.consent === 'declined'
-    ? h('div', { class: 'info' }, '你選擇不參與研究：系統照常使用，但不會記錄你的學習訊號，也不保存提問與小考作答。')
+    ? h('div', { class: 'info' }, '你選擇不參與研究：所有學習功能照常可用，但不會記錄你的學習訊號，也不保存提問與小考作答。')
     : null;
 
   if (st.stage === 'prediction') return show(back, banner, h('div', { class: 'card' }, h('h2', {}, '老師尚未開放本單元'), h('p', {}, '請稍後再回來。')));
@@ -141,8 +141,8 @@ function consentView(id) {
   return h('section', { class: 'card' },
     h('div', { class: 'muted' }, '研究參與說明（示範版，正式版以倫理審查核准的同意書為準）'),
     h('h1', {}, '要不要讓你的匿名學習資料用於研究？'),
-    h('p', {}, '同意的話，系統會用代號記錄你在本單元的答錯、看簡化說明、按「我還是不懂」、提問與驗證小考作答，用來研究老師能否提早看見全班卡關的概念。老師只看得到全班統計，看不到你的名字或個人資料。'),
-    h('p', {}, '不參與也可以照常使用系統，不影響成績；你的學習訊號、提問與小考作答都不會被保存。'),
+    h('p', {}, '同意的話，系統會用代號記錄你在本單元的課中練習首次答錯、看簡化說明、按「我還是不懂」、提問與驗證小考作答，用來研究老師能否提早看見全班卡關的概念。老師只看得到全班統計，看不到你的名字或個人資料。'),
+    h('p', {}, '不參與也可以使用系統所有學習功能，不影響成績；你的學習訊號、提問與小考作答都不會被保存。'),
     h('div', { class: 'row' },
       h('button', { class: 'btn primary', onclick: () => decide('consented') }, '同意參與研究'),
       h('button', { class: 'btn', onclick: () => decide('declined') }, '不參與研究')));
@@ -196,21 +196,22 @@ async function unitView(id, st, ui) {
 
   const help = h('section', { class: 'card' },
     h('h2', {}, '需要更多協助嗎？'),
-    h('div', { class: consented ? 'grid3' : 'row' },
+    h('div', { class: 'grid3' },
       h('button', { class: 'btn', disabled: level >= 3, onclick: () => run(async () => {
         await api('POST', '/api/student/level_down', { concept_id: c.concept_id }, id);
         render();
       }) }, level >= 3 ? '已是最簡單的說明' : '看更簡單的說明'),
-      consented ? h('button', { class: 'btn' + (ui.nuDone[c.concept_id] ? ' selected' : ''), onclick: () => run(async () => {
-        await api('POST', '/api/student/not_understood', { concept_id: c.concept_id }, id);
-        ui.nuDone[c.concept_id] = true;
+      h('button', { class: 'btn' + (ui.nuDone[c.concept_id] ? ' selected' : ''), onclick: () => run(async () => {
+        const r = await api('POST', '/api/student/not_understood', { concept_id: c.concept_id }, id);
+        ui.nuDone[c.concept_id] = r;
         render();
-      }) }, ui.nuDone[c.concept_id] ? '已記錄：我還是不懂' : '我還是不懂') : null,
-      consented ? h('button', { class: 'btn' + (ui.askOpen ? ' selected' : ''), onclick: () => { ui.askOpen = true; render(); } }, '留下問題') : null),
-    ui.nuDone[c.concept_id] ? h('p', { class: 'muted', role: 'status' }, '已記錄。你可以看更簡單的說明，或留下問題。') : null,
-    consented && ui.askOpen ? questionBox(id, c, ui) : null,
-    consented && !ui.askOpen && ui.askSent[c.concept_id]
-      ? h('div', { class: 'info row between', role: 'status' }, h('b', {}, '已記錄你的問題'),
+      }) }, ui.nuDone[c.concept_id] && ui.nuDone[c.concept_id].recorded ? '已記錄：我還是不懂' : '我還是不懂'),
+      h('button', { class: 'btn' + (ui.askOpen ? ' selected' : ''), onclick: () => { ui.askOpen = true; render(); } }, '留下問題')),
+    ui.nuDone[c.concept_id] ? h('p', { class: 'muted', role: 'status' }, ui.nuDone[c.concept_id].message) : null,
+    ui.askOpen ? questionBox(id, c, ui, consented) : null,
+    !ui.askOpen && ui.askSent[c.concept_id]
+      ? h('div', { class: (ui.askSent[c.concept_id].recorded ? 'info' : 'notice') + ' row between', role: 'status' },
+        h('b', {}, ui.askSent[c.concept_id].message),
         h('button', { class: 'btn link', onclick: () => { ui.askOpen = true; render(); } }, '再留一個問題'))
       : null);
 
@@ -243,18 +244,19 @@ async function unitView(id, st, ui) {
     nav);
 }
 
-function questionBox(id, c, ui) {
+function questionBox(id, c, ui, consented) {
   const ta = h('textarea', { id: 'q-text', rows: 3, placeholder: '例如：我知道公式，但不知道 τ 變大代表什麼' });
   return h('div', { style: 'display:flex;flex-direction:column;gap:8px' },
     h('label', { for: 'q-text' }, h('b', {}, '你卡在哪裡？')),
     h('span', { class: 'small', style: 'color:var(--warn-ink);font-weight:500' }, '請勿輸入姓名、學號、聯絡方式。'),
+    consented ? null : h('span', { class: 'small', style: 'color:var(--warn-ink)' }, '此問題不會被儲存或納入研究；如需協助請使用課程既有提問管道。'),
     ta,
     h('div', { class: 'row', style: 'justify-content:flex-end' },
       h('button', { class: 'btn', onclick: () => { ui.askOpen = false; render(); } }, '取消'),
       h('button', { class: 'btn primary', onclick: () => run(async () => {
         if (!ta.value.trim()) return toast('請先寫下問題');
-        await api('POST', '/api/student/question', { concept_id: c.concept_id, text: ta.value }, id);
-        ui.askOpen = false; ui.askSent[c.concept_id] = true;
+        const r = await api('POST', '/api/student/question', { concept_id: c.concept_id, text: ta.value }, id);
+        ui.askOpen = false; ui.askSent[c.concept_id] = r;
         render();
       }) }, '送出問題')));
 }
@@ -265,6 +267,10 @@ async function quizView(id, ui) {
     return h('section', { class: 'card' }, h('h2', {}, '已完成單元小考，謝謝你。'), h('p', {}, '本測驗不計入課程成績，系統不顯示分數與正確答案。'));
   }
   if (q.status === 'expired') return h('section', { class: 'card' }, h('h2', {}, '本輪驗證小考已截止'));
+  if (!q.unit_completed) {
+    return h('section', { class: 'card' }, h('h2', {}, '要先完成本單元，才能作答驗證小考'),
+      h('p', {}, '你沒有在小考開放前完成本單元，這一輪不能作答驗證小考。驗證小考不計成績，不影響你的課程成績。'));
+  }
   if (q.status === 'not_started' && !ui.quizStarted) {
     return h('section', { class: 'card' },
       h('div', { class: 'muted' }, '第 1 輪｜單元小考'),

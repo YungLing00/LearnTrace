@@ -138,7 +138,7 @@ CREATE TABLE IF NOT EXISTS signal_events (
   research_code TEXT NOT NULL,
   concept_id    TEXT NOT NULL,
   signal_type   TEXT NOT NULL CHECK (signal_type IN
-                ('quiz_wrong','level_down','not_understood','question_submitted')),
+                ('practice_first_wrong','level_down','not_understood','question_submitted')),
   first_at      TEXT NOT NULL,
   source_log_id INTEGER NOT NULL REFERENCES event_log(log_id),
   PRIMARY KEY (round_id, research_code, concept_id, signal_type)   -- 去重：每種訊號最多 1 次

@@ -3,7 +3,7 @@
 重點規則（對應〈資料表與事件紀錄規格〉）：
 - 研究表只寫入 consent = consented 的學生；不同意者只更新營運層進度。
 - 每種訊號同一學生、同一概念、同一輪只記 1 次（signal_events 主鍵去重）。
-- quiz_wrong 由伺服器對答案判定，只看該學生對該題的第一次作答。
+- practice_first_wrong 由伺服器對答案判定，只看該學生對該題的第一次作答。
 - 洞察卡在教師確認小考資料時算一次並存成快照，之後不重算。
 """
 import json
@@ -14,13 +14,15 @@ from .db import tx, NOW_SQL
 from . import content as C
 
 STAGES = ['prediction', 'learning', 'quiz', 'quiz_confirmed', 'card_open', 'closed']
-SIGNALS = ['quiz_wrong', 'level_down', 'not_understood', 'question_submitted']
+SIGNALS = ['practice_first_wrong', 'level_down', 'not_understood', 'question_submitted']
 SIGNAL_LABELS = {
-    'quiz_wrong': '答錯',
+    'practice_first_wrong': '課中練習首次答錯',
     'level_down': '要求簡化說明',
     'not_understood': '按「聽不懂」',
     'question_submitted': '留下相關問題',
 }
+NOT_STORED_NOTICE = '此問題不會被儲存或納入研究；如需協助請使用課程既有提問管道。'
+NOT_RECORDED_NOTICE = '你未參與研究，這個按鈕不會被記錄或納入研究；如需協助請使用課程既有提問管道。'
 RESPONSES = {'adopt': '採納', 'later': '延後', 'known': '早就知道', 'disagree': '不同意'}
 MIN_COUNT = 5          # 少於 5 人不顯示精確人數、不出卡
 RATIO_NUM, RATIO_DEN = 3, 10   # 30%
@@ -240,7 +242,7 @@ def answer_practice(conn, account_id, round_id, item_id, choice):
             log_id = log_event(conn, r, code, concept_id, 'practice_answer',
                                {'item_id': item_id, 'choice': choice, 'correct': correct})
             if prior == 0 and not correct:
-                add_signal(conn, r, code, concept_id, 'quiz_wrong', log_id)
+                add_signal(conn, r, code, concept_id, 'practice_first_wrong', log_id)
     return {'correct': correct, 'message': item['explanation'] if correct else item['hint']}
 
 
@@ -267,14 +269,16 @@ def not_understood(conn, account_id, round_id, concept_id):
     r, rc = student_ctx(conn, account_id, round_id)
     require_stage(r, 'learning')
     check_concept(conn, r, concept_id)
+    require_consent_decided(rc)
     code = research_code(rc)
     if not code:
-        raise LTError(403, '未參與研究，這個按鈕不會記錄')
+        # 不同意研究者：按鈕照常提供，但不寫入任何資料庫
+        return {'recorded': False, 'message': NOT_RECORDED_NOTICE}
     with tx(conn):
         p = ensure_progress(conn, account_id, round_id, concept_id)
         log_id = log_event(conn, r, code, concept_id, 'not_understood', {'level': p['current_level']})
         add_signal(conn, r, code, concept_id, 'not_understood', log_id)
-    return {'recorded': True}
+    return {'recorded': True, 'message': '已記錄。你可以看更簡單的說明，或留下問題。'}
 
 
 PII_PATTERNS = [
@@ -298,13 +302,14 @@ def submit_question(conn, account_id, round_id, concept_id, text):
     r, rc = student_ctx(conn, account_id, round_id)
     require_stage(r, 'learning')
     check_concept(conn, r, concept_id)
-    code = research_code(rc)
-    if not code:
-        # 資料最小化：不同意研究者的問題文字不寫入任何資料庫
-        raise LTError(403, '未參與研究，提問不會被保存')
+    require_consent_decided(rc)
     text = (text or '').strip()
     if not text or len(text) > 500:
         raise LTError(400, '問題要有內容，且不超過 500 字')
+    code = research_code(rc)
+    if not code:
+        # 資料最小化：不同意研究者的問題文字不寫入任何資料庫，回應後即丟棄
+        return {'recorded': False, 'message': NOT_STORED_NOTICE}
     redacted, flag = redact(text)
     qid = 'Q-' + uuid.uuid4().hex[:12]                     # 由伺服器建立
     with tx(conn):
@@ -313,7 +318,7 @@ def submit_question(conn, account_id, round_id, concept_id, text):
                      (qid, round_id, code, concept_id, text, redacted, int(flag)))
         log_id = log_event(conn, r, code, concept_id, 'question_submitted', {'question_id': qid})
         add_signal(conn, r, code, concept_id, 'question_submitted', log_id)
-    return {'recorded': True}
+    return {'recorded': True, 'message': '已記錄你的問題'}
 
 
 def request_unit_complete(conn, account_id, round_id):
@@ -342,8 +347,21 @@ def request_unit_complete(conn, account_id, round_id):
     return {'completed': True, 'missing': []}
 
 
+def unit_completed(conn, account_id, round_id):
+    u = one(conn, 'SELECT unit_completed_at FROM ops.app_unit WHERE account_id=? AND round_id=?',
+            (account_id, round_id))
+    return bool(u and u['unit_completed_at'])
+
+
+def require_unit_completed(conn, account_id, round_id):
+    """「完成單元 → 驗證小考」是伺服器規則，不只是畫面流程。"""
+    if not unit_completed(conn, account_id, round_id):
+        raise LTError(409, '要先完成本單元，才能作答驗證小考')
+
+
 def quiz_view(conn, account_id, round_id):
     r, rc = student_ctx(conn, account_id, round_id)
+    done_unit = unit_completed(conn, account_id, round_id)
     status = 'not_started'
     code = research_code(rc)
     if code:
@@ -354,19 +372,20 @@ def quiz_view(conn, account_id, round_id):
                 (account_id, round_id))
         status = 'submitted' if u and u['quiz_completed_at'] else 'not_started'
     items = []
-    if r['stage'] == 'quiz' and status in ('not_started', 'started'):
+    if r['stage'] == 'quiz' and done_unit and status in ('not_started', 'started'):
         for q in rows(conn, 'SELECT q.quiz_item_id, q.stem, q.options FROM quiz_items q '
                             'JOIN concepts c ON c.concept_id = q.concept_id '
                             'WHERE q.round_id = ? ORDER BY c.seq, q.seq', (round_id,)):
             items.append({'quiz_item_id': q['quiz_item_id'], 'stem': q['stem'],
                           'options': json.loads(q['options'])})   # 不含答案與概念
-    return {'stage': r['stage'], 'status': status, 'items': items}
+    return {'stage': r['stage'], 'status': status, 'unit_completed': done_unit, 'items': items}
 
 
 def quiz_start(conn, account_id, round_id):
     r, rc = student_ctx(conn, account_id, round_id)
     require_stage(r, 'quiz')
     require_consent_decided(rc)
+    require_unit_completed(conn, account_id, round_id)
     code = research_code(rc)
     if code:
         with tx(conn):
@@ -378,6 +397,7 @@ def quiz_submit(conn, account_id, round_id, answers):
     r, rc = student_ctx(conn, account_id, round_id)
     require_stage(r, 'quiz')
     require_consent_decided(rc)
+    require_unit_completed(conn, account_id, round_id)
     items = rows(conn, 'SELECT * FROM quiz_items WHERE round_id = ?', (round_id,))
     by_id = {q['quiz_item_id']: q for q in items}
     answers = answers or {}
@@ -730,8 +750,8 @@ def research_cards(conn, researcher_id, round_id):
 
 
 EXPORT_FIELDS = ['research_code', 'round_id', 'concept_id',
-                 'quiz_wrong', 'level_down', 'not_understood', 'question_submitted',
-                 'quiz_wrong_first_at', 'level_down_first_at', 'not_understood_first_at',
+                 'practice_first_wrong', 'level_down', 'not_understood', 'question_submitted',
+                 'practice_first_wrong_first_at', 'level_down_first_at', 'not_understood_first_at',
                  'question_submitted_first_at',
                  'quiz_correct_n', 'quiz_item_n', 'quiz_missing_n', 'quiz_score',
                  'teacher_predicted', 'on_card']
